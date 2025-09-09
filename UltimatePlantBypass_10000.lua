@@ -1,1285 +1,594 @@
-"""
-КОСМИЧЕСКИЙ ЗАЩИТНИК
-Стратегия/RPG игра о защите космической станции от вторжения инопланетян
-"""
+-- Full Injectable Neural Network for Roblox (Robust, Serializable, Logger Mode)
+-- Author: (you can add your name)
+-- Date: 09.09.2025
+-- Usage: Put this file on GitHub and optionally load with game:HttpGet + loadstring.
+-- Safety: External load wrapped in pcall. Works standalone if external load fails.
 
-# Основные библиотеки для игрового движка
-import pygame
-import sys
-import random
-import time
-import math
-import numpy as np
-from enum import Enum
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional, Union, Callable
-from abc import ABC, abstractmethod
-from collections import defaultdict, deque
-import logging
-import json
-import os
-import pickle
-import uuid
-import threading
-import asyncio
-import concurrent.futures
+-- CONFIG
+local GITHUB_RAW_URL = "https://raw.githubusercontent.com/YourUsername/NeuralNetwork/main/NeuralNetwork.lua" -- replace if you want
+local AUTO_TRY_LOAD_EXTERNAL = false -- set true if you want to attempt loading external code first
 
-# Библиотеки для графики и анимации
-from pygame import gfxdraw
-import OpenGL.GL as gl
-import OpenGL.GLU as glu
-from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageFont
+-- Services
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
 
-# Библиотеки для обработки звука
-import pygame.mixer
-from pydub import AudioSegment
-import wave
-import pyaudio
+-- Utility
+local function shallowCopy(t)
+    local r = {}
+    for k,v in pairs(t) do r[k]=v end
+    return r
+end
 
-# Библиотеки для работы с базами данных
-import sqlite3
-import sqlalchemy
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+local function deepCopy(orig)
+    local lookup = {}
+    local function _copy(obj)
+        if type(obj) ~= "table" then return obj end
+        if lookup[obj] then return lookup[obj] end
+        local new = {}
+        lookup[obj] = new
+        for k,v in pairs(obj) do new[_copy(k)] = _copy(v) end
+        return setmetatable(new, getmetatable(obj))
+    end
+    return _copy(orig)
+end
 
-# Библиотеки для создания ИИ противников
-import tensorflow as tf
-import keras
-import sklearn
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.neural_network import MLPClassifier
-import gym
+local function isArray(t)
+    if type(t) ~= "table" then return false end
+    local n = 0
+    for k,v in pairs(t) do
+        if type(k) ~= "number" then return false end
+        n = n + 1
+    end
+    return true
+end
 
-# Библиотеки для работы с сетью и многопользовательским режимом
-import socket
-import requests
-import websockets
-import aiohttp
-import asyncio
+-- Optional external load (safe)
+if AUTO_TRY_LOAD_EXTERNAL then
+    local ok, res = pcall(function()
+        local raw = game:HttpGet(GITHUB_RAW_URL, true)
+        local f, err = loadstring(raw)
+        if not f then error("loadstring error: "..tostring(err)) end
+        return f()
+    end)
+    if ok then
+        -- assume external script did everything and returned true/void
+        print("[NeuralNet] External implementation loaded successfully.")
+        -- Do not continue to redefine if external intentionally returned/handled everything.
+        -- But for safety, we continue to define a local implementation below unless the external script set a global marker.
+    else
+        warn("[NeuralNet] External load failed, using local implementation. Error:", res)
+    end
+end
 
-# Библиотеки для интерфейса пользователя
-import tkinter as tk
-from tkinter import ttk
-import pyglet
-import pygame_gui
+-- Neural Network Implementation
+local NeuralNetwork = {}
+NeuralNetwork.__index = NeuralNetwork
 
-# Библиотеки для генерации процедурного контента
-import noise
-import opensimplex
-import voronoi
+-- Activation functions and derivatives
+local Activations = {}
 
-# Библиотеки для обработки и анализа данных
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+function Activations.sigmoid(x)
+    return 1 / (1 + math.exp(-x))
+end
+function Activations.sigmoidDerivativeFromZ(z)
+    local s = Activations.sigmoid(z)
+    return s * (1 - s)
+end
 
-# Библиотеки для работы с файловой системой и конфигурацией
-import configparser
-import yaml
-import toml
-import xml.etree.ElementTree as ET
+function Activations.relu(x)
+    return math.max(0, x)
+end
+function Activations.reluDerivativeFromZ(z)
+    return z > 0 and 1 or 0
+end
 
-# Библиотеки для логирования и отладки
-import logging.handlers
-import traceback
-import debugpy
+function Activations.tanh(x)
+    return math.tanh(x)
+end
+function Activations.tanhDerivativeFromZ(z)
+    local t = math.tanh(z)
+    return 1 - t * t
+end
 
-# Дополнительные библиотеки
-import arrow  # для работы с датами и временем
-import colorama  # для цветного вывода в консоль
-import tqdm  # для отображения прогресс-баров
-import click  # для создания CLI
-import rich  # для улучшенного вывода в терминал
-import pyfiglet  # для ASCII-арта
+-- Helper to get activation and derivative functions by name
+local function getActivationByName(name)
+    name = (name or "sigmoid"):lower()
+    if name == "sigmoid" then
+        return Activations.sigmoid, Activations.sigmoidDerivativeFromZ
+    elseif name == "relu" then
+        return Activations.relu, Activations.reluDerivativeFromZ
+    elseif name == "tanh" then
+        return Activations.tanh, Activations.tanhDerivativeFromZ
+    else
+        return Activations.sigmoid, Activations.sigmoidDerivativeFromZ
+    end
+end
 
-# Инициализация pygame
-pygame.init()
-pygame.mixer.init()
+-- Constructor:
+-- inputSize (number), hiddenLayers (array of numbers), outputSize (number), options table
+-- options.learningRate, options.activation (string), options.initRange (number)
+function NeuralNetwork.new(inputSize, hiddenLayers, outputSize, options)
+    assert(type(inputSize) == "number" and inputSize >= 1, "inputSize must be number >=1")
+    options = options or {}
+    local self = setmetatable({}, NeuralNetwork)
 
-# Константы
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
-FPS = 60
-TITLE = "Космический Защитник"
+    self.learningRate = options.learningRate or 0.1
+    self.activationName = options.activation or "sigmoid"
+    self.activation, self.activationDerivative = getActivationByName(self.activationName)
+    self.initRange = options.initRange or 0.1 -- weights initialized in [-initRange, initRange]
 
-# Цвета
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-RED = (255, 0, 0)
-GREEN = (0, 255, 0)
-BLUE = (0, 0, 255)
-YELLOW = (255, 255, 0)
-CYAN = (0, 255, 255)
-MAGENTA = (255, 0, 255)
+    -- layerSizes is array: {inputSize, hidden1, hidden2, ..., outputSize}
+    self.layerSizes = { inputSize }
+    if type(hiddenLayers) == "table" then
+        for _, s in ipairs(hiddenLayers) do
+            assert(type(s) == "number" and s >= 1, "hidden layer sizes must be numbers >=1")
+            table.insert(self.layerSizes, s)
+        end
+    end
+    table.insert(self.layerSizes, outputSize)
 
-# Настройка базы данных
-Base = declarative_base()
-engine = create_engine('sqlite:///space_defender.db')
-Session = sessionmaker(bind=engine)
+    -- weights[l][j][i] => weight for layer l (from layer l to l+1), neuron j in next layer, input i from current layer
+    self.weights = {}
+    self.biases = {}
+    for l = 1, #self.layerSizes - 1 do
+        local inSize = self.layerSizes[l]
+        local outSize = self.layerSizes[l+1]
+        self.weights[l] = {}
+        self.biases[l] = {}
+        for j = 1, outSize do
+            self.weights[l][j] = {}
+            -- initialize weights
+            for i = 1, inSize do
+                -- uniform random in [-initRange, initRange]
+                self.weights[l][j][i] = (math.random() * 2 - 1) * self.initRange
+            end
+            -- bias
+            self.biases[l][j] = (math.random() * 2 - 1) * self.initRange
+        end
+    end
 
-# Модель данных для сохранения игры
-class PlayerData(Base):
-    __tablename__ = 'players'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    level = Column(Integer)
-    experience = Column(Integer)
-    credits = Column(Integer)
-    station_health = Column(Integer)
-    
-    upgrades = relationship("UpgradeData", back_populates="player")
-    weapons = relationship("WeaponData", back_populates="player")
+    return self
+end
 
-class UpgradeData(Base):
-    __tablename__ = 'upgrades'
-    
-    id = Column(Integer, primary_key=True)
-    player_id = Column(Integer, ForeignKey('players.id'))
-    name = Column(String)
-    level = Column(Integer)
-    cost = Column(Integer)
-    
-    player = relationship("PlayerData", back_populates="upgrades")
+-- Forward pass: returns activations of all layers (array of arrays), and z values per layer (pre-activation sums)
+function NeuralNetwork:forwardAll(input)
+    assert(type(input) == "table", "input must be table")
+    local activations = {}
+    activations[1] = deepCopy(input)
 
-class WeaponData(Base):
-    __tablename__ = 'weapons'
-    
-    id = Column(Integer, primary_key=True)
-    player_id = Column(Integer, ForeignKey('players.id'))
-    name = Column(String)
-    damage = Column(Integer)
-    cooldown = Column(Float)
-    
-    player = relationship("PlayerData", back_populates="weapons")
+    local zvals = {}
 
-# Создание таблиц в базе данных
-Base.metadata.create_all(engine)
+    for l = 1, #self.layerSizes - 1 do
+        local inActs = activations[l]
+        local outActs = {}
+        local zlayer = {}
+        for j = 1, self.layerSizes[l+1] do
+            local sum = self.biases[l][j] or 0
+            for i = 1, self.layerSizes[l] do
+                sum = sum + (inActs[i] or 0) * (self.weights[l][j][i] or 0)
+            end
+            zlayer[j] = sum
+            outActs[j] = self.activation(sum)
+        end
+        zvals[l] = zlayer
+        activations[l+1] = outActs
+    end
 
-# Настройка логирования
-logger = logging.getLogger('space_defender')
-logger.setLevel(logging.DEBUG)
-file_handler = logging.FileHandler('space_defender.log')
-file_handler.setLevel(logging.DEBUG)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.ERROR)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+    return activations, zvals
+end
 
-# Классы для игровых объектов
-class GameObject(ABC):
-    def __init__(self, x, y, width, height):
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.hitbox = pygame.Rect(x, y, width, height)
-        self.active = True
-        self.id = str(uuid.uuid4())
-    
-    def update_hitbox(self):
-        self.hitbox = pygame.Rect(self.x, self.y, self.width, self.height)
-    
-    @abstractmethod
-    def update(self, dt):
-        pass
-    
-    @abstractmethod
-    def draw(self, surface):
-        pass
-    
-    def collides_with(self, other):
-        return self.hitbox.colliderect(other.hitbox)
+-- Simple predict: returns output layer activation (array)
+function NeuralNetwork:predict(input)
+    local activations = self:forwardAll(input)
+    return activations[1][#activations[1]] and activations[1][#activations[1]] or (self:forwardAll(input))
+end
 
-class SpaceStation(GameObject):
-    def __init__(self, x, y):
-        super().__init__(x, y, 120, 120)
-        self.health = 1000
-        self.max_health = 1000
-        self.shield = 500
-        self.max_shield = 500
-        self.credits = 1000
-        self.weapons = []
-        self.crew = []
-        self.upgrades = {}
-        self.rotation = 0
-        self.image = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        self.image.fill((0, 0, 0, 0))
-        pygame.draw.circle(self.image, BLUE, (self.width // 2, self.height // 2), self.width // 2)
-        pygame.draw.circle(self.image, CYAN, (self.width // 2, self.height // 2), self.width // 3)
-    
-    def update(self, dt):
-        self.rotation += 0.5 * dt
-        self.shield = min(self.shield + 0.1 * dt, self.max_shield)
-        self.update_hitbox()
-    
-    def draw(self, surface):
-        rotated_image = pygame.transform.rotate(self.image, self.rotation)
-        new_rect = rotated_image.get_rect(center=self.image.get_rect(topleft=(self.x, self.y)).center)
-        surface.blit(rotated_image, new_rect.topleft)
-        
-        # Отображение полосок здоровья и щита
-        pygame.draw.rect(surface, RED, (self.x, self.y - 20, self.width, 5))
-        health_width = max(0, (self.health / self.max_health) * self.width)
-        pygame.draw.rect(surface, GREEN, (self.x, self.y - 20, health_width, 5))
-        
-        pygame.draw.rect(surface, BLUE, (self.x, self.y - 10, self.width, 5))
-        shield_width = max(0, (self.shield / self.max_shield) * self.width)
-        pygame.draw.rect(surface, CYAN, (self.x, self.y - 10, shield_width, 5))
-    
-    def take_damage(self, amount):
-        if self.shield > 0:
-            shield_damage = min(self.shield, amount)
-            self.shield -= shield_damage
-            amount -= shield_damage
-        
-        if amount > 0:
-            self.health -= amount
-            if self.health <= 0:
-                self.health = 0
-                return True  # Станция уничтожена
-        return False
+-- Backpropagation for a single sample (input, target)
+-- input: array, target: array
+function NeuralNetwork:backwardSingle(input, target)
+    -- forward
+    local activations, zvals = self:forwardAll(input)
+    local L = #self.layerSizes - 1 -- number of weight layers
+    -- delta[l][j] corresponds to layer l (1..L), neuron j in that next layer
+    local delta = {}
+    -- output layer delta
+    delta[L] = {}
+    for j = 1, self.layerSizes[#self.layerSizes] do
+        local a = activations[#activations][j] or 0
+        local err = a - (target[j] or 0)
+        local deriv = self.activationDerivative(zvals[L][j] or 0)
+        delta[L][j] = err * deriv
+    end
 
-class Enemy(GameObject):
-    def __init__(self, x, y, enemy_type):
-        size = random.randint(20, 50)
-        super().__init__(x, y, size, size)
-        self.enemy_type = enemy_type
-        self.health = 50 + enemy_type * 25
-        self.max_health = self.health
-        self.speed = 1 + enemy_type * 0.5
-        self.damage = 10 + enemy_type * 5
-        self.attack_cooldown = 0
-        self.worth = 10 + enemy_type * 5
-        
-        # Различный цвет для разных типов врагов
-        colors = {
-            0: RED,
-            1: MAGENTA,
-            2: YELLOW,
-            3: (255, 128, 0)  # Оранжевый
-        }
-        self.color = colors.get(enemy_type, RED)
-        
-        # Создание изображения врага
-        self.image = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        self.image.fill((0, 0, 0, 0))
-        
-        if enemy_type == 0:  # Scout - треугольник
-            points = [
-                (self.width // 2, 0),
-                (0, self.height),
-                (self.width, self.height)
-            ]
-            pygame.draw.polygon(self.image, self.color, points)
-        elif enemy_type == 1:  # Fighter - ромб
-            points = [
-                (self.width // 2, 0),
-                (0, self.height // 2),
-                (self.width // 2, self.height),
-                (self.width, self.height // 2)
-            ]
-            pygame.draw.polygon(self.image, self.color, points)
-        elif enemy_type == 2:  # Cruiser - шестиугольник
-            points = []
-            for i in range(6):
-                angle = math.pi / 3 * i
-                x = self.width // 2 + int(self.width // 2 * math.cos(angle))
-                y = self.height // 2 + int(self.height // 2 * math.sin(angle))
-                points.append((x, y))
-            pygame.draw.polygon(self.image, self.color, points)
-        else:  # Dreadnought - восьмиугольник
-            points = []
-            for i in range(8):
-                angle = math.pi / 4 * i
-                x = self.width // 2 + int(self.width // 2 * math.cos(angle))
-                y = self.height // 2 + int(self.height // 2 * math.sin(angle))
-                points.append((x, y))
-            pygame.draw.polygon(self.image, self.color, points)
-        
-        # Добавление свечения с помощью альфа-канала
-        glow = pygame.Surface((self.width + 10, self.height + 10), pygame.SRCALPHA)
-        for i in range(5):
-            alpha = 100 - i * 20
-            glow_color = (*self.color, alpha)
-            pygame.draw.rect(glow, glow_color, (i, i, self.width + 10 - i*2, self.height + 10 - i*2), 1)
-        
-        self.image = glow
-    
-    def update(self, dt, target):
-        # Движение к цели
-        dx = target.x + target.width // 2 - (self.x + self.width // 2)
-        dy = target.y + target.height // 2 - (self.y + self.height // 2)
-        distance = math.sqrt(dx * dx + dy * dy)
-        
-        if distance > 0:
-            dx /= distance
-            dy /= distance
-            
-            self.x += dx * self.speed * dt
-            self.y += dy * self.speed * dt
-        
-        # Обновление атаки
-        if self.attack_cooldown > 0:
-            self.attack_cooldown -= dt
-        
-        self.update_hitbox()
-        
-        # Проверка столкновения с целью
-        return self.collides_with(target)
-    
-    def draw(self, surface):
-        surface.blit(self.image, (self.x, self.y))
-        
-        # Отображение полоски здоровья
-        pygame.draw.rect(surface, RED, (self.x, self.y - 10, self.width, 5))
-        health_width = max(0, (self.health / self.max_health) * self.width)
-        pygame.draw.rect(surface, GREEN, (self.x, self.y - 10, health_width, 5))
-    
-    def take_damage(self, amount):
-        self.health -= amount
-        if self.health <= 0:
-            self.health = 0
-            return True  # Враг уничтожен
-        return False
+    -- backpropagate
+    for l = L-1, 1, -1 do
+        delta[l] = {}
+        for j = 1, self.layerSizes[l+1] do
+            local err = 0
+            for k = 1, self.layerSizes[l+2] do
+                err = err + (delta[l+1][k] or 0) * (self.weights[l+1][k][j] or 0)
+            end
+            local deriv = self.activationDerivative(zvals[l][j] or 0)
+            delta[l][j] = err * deriv
+        end
+    end
 
-class Weapon(GameObject):
-    def __init__(self, x, y, weapon_type, parent):
-        size = 30
-        super().__init__(x, y, size, size)
-        self.weapon_type = weapon_type
-        self.parent = parent
-        self.angle = 0
-        self.target = None
-        self.cooldown = 0
-        
-        # Параметры оружия в зависимости от типа
-        if weapon_type == 0:  # Laser
-            self.damage = 10
-            self.max_cooldown = 0.5
-            self.range = 300
-            self.color = RED
-        elif weapon_type == 1:  # Plasma
-            self.damage = 20
-            self.max_cooldown = 1.0
-            self.range = 250
-            self.color = GREEN
-        elif weapon_type == 2:  # Ion
-            self.damage = 15
-            self.max_cooldown = 0.8
-            self.range = 350
-            self.color = BLUE
-        else:  # Missile
-            self.damage = 30
-            self.max_cooldown = 2.0
-            self.range = 400
-            self.color = YELLOW
-        
-        # Создание изображения оружия
-        self.image = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        self.image.fill((0, 0, 0, 0))
-        pygame.draw.circle(self.image, WHITE, (self.width // 2, self.height // 2), self.width // 2)
-        pygame.draw.circle(self.image, self.color, (self.width // 2, self.height // 2), self.width // 3)
-        
-        # Список активных снарядов
-        self.projectiles = []
-    
-    def update(self, dt, enemies):
-        # Следование за родительским объектом
-        self.x = self.parent.x + self.parent.width // 2 - self.width // 2
-        self.y = self.parent.y + self.parent.height // 2 - self.height // 2
-        
-        # Обновление кулдауна
-        if self.cooldown > 0:
-            self.cooldown -= dt
-        
-        # Поиск ближайшего врага в радиусе действия
-        nearest_enemy = None
-        min_distance = float('inf')
-        
-        for enemy in enemies:
-            dx = enemy.x + enemy.width // 2 - (self.x + self.width // 2)
-            dy = enemy.y + enemy.height // 2 - (self.y + self.height // 2)
-            distance = math.sqrt(dx * dx + dy * dy)
-            
-            if distance <= self.range and distance < min_distance:
-                min_distance = distance
-                nearest_enemy = enemy
-        
-        self.target = nearest_enemy
-        
-        # Поворот к цели
-        if self.target:
-            dx = self.target.x + self.target.width // 2 - (self.x + self.width // 2)
-            dy = self.target.y + self.target.height // 2 - (self.y + self.height // 2)
-            self.angle = math.degrees(math.atan2(-dy, dx))
-            
-            # Стрельба по цели
-            if self.cooldown <= 0:
-                self.fire()
-                self.cooldown = self.max_cooldown
-        
-        # Обновление снарядов
-        for projectile in self.projectiles[:]:
-            projectile['lifetime'] -= dt
-            
-            if projectile['lifetime'] <= 0:
-                self.projectiles.remove(projectile)
-                continue
-            
-            # Движение снаряда
-            projectile['x'] += projectile['dx'] * projectile['speed'] * dt
-            projectile['y'] += projectile['dy'] * projectile['speed'] * dt
-            
-            # Проверка столкновения с врагами
-            hit = False
-            for enemy in enemies:
-                if (projectile['x'] >= enemy.x and
-                    projectile['x'] <= enemy.x + enemy.width and
-                    projectile['y'] >= enemy.y and
-                    projectile['y'] <= enemy.y + enemy.height):
-                    
-                    if enemy.take_damage(self.damage):
-                        # Враг уничтожен, начисление кредитов
-                        self.parent.credits += enemy.worth
-                        enemies.remove(enemy)
-                    
-                    hit = True
-                    break
-            
-            if hit:
-                self.projectiles.remove(projectile)
-        
-        self.update_hitbox()
-    
-    def draw(self, surface):
-        # Отрисовка оружия
-        rotated_image = pygame.transform.rotate(self.image, self.angle)
-        new_rect = rotated_image.get_rect(center=self.image.get_rect(topleft=(self.x, self.y)).center)
-        surface.blit(rotated_image, new_rect.topleft)
-        
-        # Радиус действия (при отладке)
-        # pygame.draw.circle(surface, self.color, (self.x + self.width // 2, self.y + self.height // 2), self.range, 1)
-        
-        # Отрисовка снарядов
-        for projectile in self.projectiles:
-            pygame.draw.circle(surface, self.color, (int(projectile['x']), int(projectile['y'])), projectile['size'])
-    
-    def fire(self):
-        if not self.target:
-            return
-        
-        # Создание снаряда
-        start_x = self.x + self.width // 2
-        start_y = self.y + self.height // 2
-        
-        target_x = self.target.x + self.target.width // 2
-        target_y = self.target.y + self.target.height // 2
-        
-        dx = target_x - start_x
-        dy = target_y - start_y
-        distance = math.sqrt(dx * dx + dy * dy)
-        
-        if distance > 0:
-            dx /= distance
-            dy /= distance
-        
-        projectile = {
-            'x': start_x,
-            'y': start_y,
-            'dx': dx,
-            'dy': dy,
-            'speed': 10,
-            'size': 5,
-            'damage': self.damage,
-            'lifetime': self.range / 10  # Время жизни снаряда зависит от дальности
-        }
-        
-        self.projectiles.append(projectile)
-        
-        # Воспроизведение звука выстрела
-        if self.weapon_type == 0:  # Laser
-            pygame.mixer.Sound('sounds/laser.wav' if os.path.exists('sounds/laser.wav') else None).play()
-        elif self.weapon_type == 1:  # Plasma
-            pygame.mixer.Sound('sounds/plasma.wav' if os.path.exists('sounds/plasma.wav') else None).play()
-        elif self.weapon_type == 2:  # Ion
-            pygame.mixer.Sound('sounds/ion.wav' if os.path.exists('sounds/ion.wav') else None).play()
-        else:  # Missile
-            pygame.mixer.Sound('sounds/missile.wav' if os.path.exists('sounds/missile.wav') else None).play()
+    -- update weights and biases (gradient descent)
+    for l = 1, L do
+        for j = 1, self.layerSizes[l+1] do
+            for i = 1, self.layerSizes[l] do
+                local grad = (delta[l][j] or 0) * (activations[l][i] or 0)
+                self.weights[l][j][i] = (self.weights[l][j][i] or 0) - self.learningRate * grad
+            end
+            self.biases[l][j] = (self.biases[l][j] or 0) - self.learningRate * (delta[l][j] or 0)
+        end
+    end
+end
 
-class ParticleSystem:
-    def __init__(self):
-        self.particles = []
-    
-    def add_explosion(self, x, y, color=YELLOW, num_particles=20):
-        for _ in range(num_particles):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(1, 5)
-            size = random.uniform(2, 8)
-            lifetime = random.uniform(0.5, 2.0)
-            
-            particle = {
-                'x': x,
-                'y': y,
-                'dx': math.cos(angle) * speed,
-                'dy': math.sin(angle) * speed,
-                'size': size,
-                'color': color,
-                'lifetime': lifetime,
-                'max_lifetime': lifetime
-            }
-            
-            self.particles.append(particle)
-    
-    def update(self, dt):
-        for particle in self.particles[:]:
-            particle['lifetime'] -= dt
-            
-            if particle['lifetime'] <= 0:
-                self.particles.remove(particle)
-                continue
-            
-            particle['x'] += particle['dx'] * dt
-            particle['y'] += particle['dy'] * dt
-            
-            # Постепенное уменьшение размера
-            ratio = particle['lifetime'] / particle['max_lifetime']
-            particle['size'] *= 0.99
-    
-    def draw(self, surface):
-        for particle in self.particles:
-            ratio = particle['lifetime'] / particle['max_lifetime']
-            color = particle['color']
-            alpha = int(255 * ratio)
-            size = int(particle['size'])
-            
-            if size <= 0:
-                continue
-            
-            pygame.draw.circle(surface, (*color, alpha), (int(particle['x']), int(particle['y'])), size)
+-- Train: inputs: array of input arrays, targets: array of target arrays
+-- options: epochs (number), shuffle (bool), verboseEvery (number of epochs for logging), batchSize (number or nil for full sample)
+function NeuralNetwork:train(inputs, targets, options)
+    options = options or {}
+    local epochs = options.epochs or 1
+    local shuffle = options.shuffle == nil and true or options.shuffle
+    local verboseEvery = options.verboseEvery or math.max(1, math.floor(epochs / 10))
+    local batchSize = options.batchSize or 1 -- 1 = stochastic gradient descent
 
-class StarField:
-    def __init__(self, width, height, num_stars=200):
-        self.width = width
-        self.height = height
-        self.stars = []
-        
-        for _ in range(num_stars):
-            star = {
-                'x': random.randint(0, width),
-                'y': random.randint(0, height),
-                'size': random.uniform(0.5, 3),
-                'brightness': random.uniform(0.5, 1.0),
-                'speed': random.uniform(0.1, 0.5)
-            }
-            self.stars.append(star)
-    
-    def update(self, dt):
-        for star in self.stars:
-            # Мерцание звезд
-            star['brightness'] += random.uniform(-0.05, 0.05)
-            star['brightness'] = max(0.3, min(1.0, star['brightness']))
-            
-            # Легкое движение звезд (эффект параллакса)
-            star['y'] += star['speed'] * dt
-            
-            # Перенос звезд, вышедших за пределы экрана
-            if star['y'] > self.height:
-                star['y'] = 0
-                star['x'] = random.randint(0, self.width)
-    
-    def draw(self, surface):
-        for star in self.stars:
-            brightness = int(255 * star['brightness'])
-            color = (brightness, brightness, brightness)
-            pygame.draw.circle(surface, color, (int(star['x']), int(star['y'])), star['size'])
+    assert(#inputs == #targets, "inputs and targets must have same length")
+    local n = #inputs
+    for epoch = 1, epochs do
+        -- create indices
+        local indices = {}
+        for i=1,n do indices[i] = i end
+        if shuffle then
+            for i = n, 2, -1 do
+                local j = math.random(1, i)
+                indices[i], indices[j] = indices[j], indices[i]
+            end
+        end
 
-class Button:
-    def __init__(self, x, y, width, height, text, color=BLUE, hover_color=CYAN, text_color=WHITE):
-        self.rect = pygame.Rect(x, y, width, height)
-        self.text = text
-        self.color = color
-        self.hover_color = hover_color
-        self.text_color = text_color
-        self.is_hovered = False
-        self.font = pygame.font.SysFont(None, 24)
-    
-    def draw(self, surface):
-        color = self.hover_color if self.is_hovered else self.color
-        pygame.draw.rect(surface, color, self.rect)
-        pygame.draw.rect(surface, WHITE, self.rect, 2)  # Border
-        
-        text_surface = self.font.render(self.text, True, self.text_color)
-        text_rect = text_surface.get_rect(center=self.rect.center)
-        surface.blit(text_surface, text_rect)
-    
-    def check_hover(self, pos):
-        self.is_hovered = self.rect.collidepoint(pos)
-        return self.is_hovered
-    
-    def is_clicked(self, pos, event):
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            return self.rect.collidepoint(pos)
-        return False
+        -- mini-batch loop
+        local idx = 1
+        while idx <= n do
+            local endIdx = math.min(n, idx + batchSize - 1)
+            -- accumulate gradients by applying updates per sample (simple approach: apply per sample)
+            for k = idx, endIdx do
+                local sampleIndex = indices[k]
+                self:backwardSingle(inputs[sampleIndex], targets[sampleIndex])
+            end
+            idx = endIdx + 1
+        end
 
-class GameState(Enum):
-    MENU = 0
-    PLAYING = 1
-    PAUSED = 2
-    GAME_OVER = 3
-    SHOP = 4
-    VICTORY = 5
+        if verboseEvery > 0 and epoch % verboseEvery == 0 then
+            print(string.format("[NeuralNet] Epoch %d/%d complete", epoch, epochs))
+        end
+    end
+end
 
-class SpaceDefenderGame:
-    def __init__(self):
-        # Настройка окна
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption(TITLE)
-        self.clock = pygame.time.Clock()
-        
-        # Состояние игры
-        self.state = GameState.MENU
-        self.level = 1
-        self.wave = 1
-        self.score = 0
-        self.time_elapsed = 0
-        self.wave_timer = 0
-        self.enemies_in_wave = 10
-        self.enemies_spawned = 0
-        self.wave_interval = 30  # Секунды между волнами
-        
-        # Игровые объекты
-        self.station = SpaceStation(SCREEN_WIDTH // 2 - 60, SCREEN_HEIGHT // 2 - 60)
-        self.weapons = []
-        self.enemies = []
-        self.particles = ParticleSystem()
-        self.starfield = StarField(SCREEN_WIDTH, SCREEN_HEIGHT)
-        
-        # Добавление стандартного оружия
-        self.weapons.append(Weapon(0, 0, 0, self.station))  # Лазер
-        
-        # Меню и интерфейс
-        self.buttons = {
-            GameState.MENU: [
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 - 50, 200, 50, "Начать игру"),
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 20, 200, 50, "Выход")
-            ],
-            GameState.PAUSED: [
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 - 50, 200, 50, "Продолжить"),
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 20, 200, 50, "Главное меню")
-            ],
-            GameState.GAME_OVER: [
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 50, 200, 50, "Начать заново"),
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 120, 200, 50, "Главное меню")
-            ],
-            GameState.VICTORY: [
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 50, 200, 50, "Следующий уровень"),
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 120, 200, 50, "Главное меню")
-            ],
-            GameState.SHOP: [
-                Button(SCREEN_WIDTH // 2 - 300, SCREEN_HEIGHT // 2 - 100, 200, 50, "Лазер (100 кр.)"),
-                Button(SCREEN_WIDTH // 2 - 300, SCREEN_HEIGHT // 2 - 30, 200, 50, "Плазма (200 кр.)"),
-                Button(SCREEN_WIDTH // 2 + 100, SCREEN_HEIGHT // 2 - 100, 200, 50, "Ионная пушка (300 кр.)"),
-                Button(SCREEN_WIDTH // 2 + 100, SCREEN_HEIGHT // 2 - 30, 200, 50, "Ракеты (400 кр.)"),
-                Button(SCREEN_WIDTH // 2 - 300, SCREEN_HEIGHT // 2 + 40, 200, 50, "Улучшить щиты (150 кр.)"),
-                Button(SCREEN_WIDTH // 2 + 100, SCREEN_HEIGHT // 2 + 40, 200, 50, "Улучшить корпус (150 кр.)"),
-                Button(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 + 110, 200, 50, "Вернуться в игру")
-            ]
-        }
-        
-        # Загрузка звуков
-        self.sounds = {}
-        sounds_path = "sounds"
-        if not os.path.exists(sounds_path):
-            os.makedirs(sounds_path)
-            self.create_default_sounds(sounds_path)
-        
-        self.load_sounds()
-        
-        # Шрифты
-        self.title_font = pygame.font.SysFont(None, 64)
-        self.menu_font = pygame.font.SysFont(None, 36)
-        self.game_font = pygame.font.SysFont(None, 24)
-        self.small_font = pygame.font.SysFont(None, 18)
-        
-    def create_default_sounds(self, path):
-        """Создает базовые звуковые файлы, если они отсутствуют"""
-        # Создание простых звуковых сигналов с помощью wave и struct
-        try:
-            import struct
-            
-            # Функция для создания простого звукового сигнала
-            def create_sound(filename, frequency, duration, volume=0.5):
-                sample_rate = 44100
-                num_samples = int(sample_rate * duration)
-                audio_data = []
-                
-                for i in range(num_samples):
-                    t = float(i) / sample_rate
-                    value = int(32767.0 * volume * math.sin(2 * math.pi * frequency * t))
-                    audio_data.append(struct.pack('h', value))
-                
-                audio_data = b''.join(audio_data)
-                
-                with wave.open(os.path.join(path, filename), 'wb') as wave_file:
-                    wave_file.setnchannels(1)
-                    wave_file.setsampwidth(2)
-                    wave_file.setframerate(sample_rate)
-                    wave_file.writeframes(audio_data)
-            
-            # Создание различных звуков для игры
-            create_sound("laser.wav", 880, 0.2, 0.3)  # Высокий короткий звук для лазера
-            create_sound("plasma.wav", 220, 0.3, 0.5)  # Низкий звук для плазмы
-            create_sound("ion.wav", 440, 0.3, 0.4)  # Средний звук для ионной пушки
-            create_sound("missile.wav", 110, 0.5, 0.6)  # Очень низкий звук для ракеты
-            create_sound("explosion.wav", 90, 0.8, 0.8)  # Взрыв
-            create_sound("hit.wav", 220, 0.1, 0.4)  # Попадание
-            create_sound("button.wav", 660, 0.1, 0.2)  # Клик кнопки
-            create_sound("victory.wav", [440, 550, 660], 1.0, 0.5)  # Победа
-            create_sound("game_over.wav", [440, 330, 220], 1.0, 0.5)  # Поражение
-        
-        except Exception as e:
-            logger.error(f"Ошибка при создании звуковых файлов: {str(e)}")
-    
-    def load_sounds(self):
-        """Загружает звуковые файлы в игру"""
-        sounds_path = "sounds"
-        for sound_name in ["laser", "plasma", "ion", "missile", "explosion", "hit", "button", "victory", "game_over"]:
-            file_path = os.path.join(sounds_path, f"{sound_name}.wav")
-            if os.path.exists(file_path):
-                try:
-                    self.sounds[sound_name] = pygame.mixer.Sound(file_path)
-                except Exception as e:
-                    logger.error(f"Ошибка при загрузке звука {sound_name}: {str(e)}")
-    
-    def play_sound(self, sound_name):
-        """Воспроизводит звук по имени"""
-        if sound_name in self.sounds:
-            self.sounds[sound_name].play()
-    
-    def start_new_game(self):
-        """Начинает новую игру"""
-        self.state = GameState.PLAYING
-        self.level = 1
-        self.wave = 1
-        self.score = 0
-        self.time_elapsed = 0
-        self.wave_timer = 0
-        self.enemies_in_wave = 10
-        self.enemies_spawned = 0
-        
-        # Сброс космической станции
-        self.station = SpaceStation(SCREEN_WIDTH // 2 - 60, SCREEN_HEIGHT // 2 - 60)
-        self.weapons = []
-        self.enemies = []
-        
-        # Добавление стандартного оружия
-        self.weapons.append(Weapon(0, 0, 0, self.station))  # Лазер
-    
-    def spawn_enemy(self):
-        """Создает нового врага"""
-        # Определяем тип врага в зависимости от волны
-        enemy_type = min(3, self.wave // 3)
-        if random.random() < 0.2:  # 20% шанс появления более сильного врага
-            enemy_type = min(3, enemy_type + 1)
-        
-        # Определяем позицию появления (за пределами экрана)
-        side = random.randint(0, 3)  # 0: верх, 1: право, 2: низ, 3: лево
-        
-        if side == 0:  # Сверху
-            x = random.randint(0, SCREEN_WIDTH)
-            y = -50
-        elif side == 1:  # Справа
-            x = SCREEN_WIDTH + 50
-            y = random.randint(0, SCREEN_HEIGHT)
-        elif side == 2:  # Снизу
-            x = random.randint(0, SCREEN_WIDTH)
-            y = SCREEN_HEIGHT + 50
-        else:  # Слева
-            x = -50
-            y = random.randint(0, SCREEN_HEIGHT)
-        
-        # Создаем и добавляем врага
-        enemy = Enemy(x, y, enemy_type)
-        self.enemies.append(enemy)
-        self.enemies_spawned += 1
-    
-    def update(self, dt):
-        """Обновляет состояние игры"""
-        # Обновляем звездное поле
-        self.starfield.update(dt)
-        
-        if self.state == GameState.PLAYING:
-            # Обновляем время
-            self.time_elapsed += dt
-            self.wave_timer += dt
-            
-            # Проверяем, нужно ли начать новую волну
-            if self.enemies_spawned < self.enemies_in_wave and len(self.enemies) < 10:
-                if random.random() < 0.02:  # 2% шанс появления врага каждый кадр
-                    self.spawn_enemy()
-            
-            # Если все враги в волне уничтожены
-            if self.enemies_spawned >= self.enemies_in_wave and len(self.enemies) == 0:
-                if self.wave % 5 == 0:  # Каждые 5 волн - магазин
-                    self.state = GameState.SHOP
-                else:
-                    self.wave += 1
-                    self.enemies_in_wave = 10 + (self.wave - 1) * 5  # Увеличиваем число врагов
-                    self.enemies_spawned = 0
-                    self.wave_timer = 0
-            
-            # Обновляем станцию
-            self.station.update(dt)
-            
-            # Обновляем оружие
-            for weapon in self.weapons:
-                weapon.update(dt, self.enemies)
-            
-            # Обновляем врагов
-            for enemy in self.enemies[:]:
-                if enemy.update(dt, self.station):
-                    # Враг достиг станции и атакует
-                    if enemy.attack_cooldown <= 0:
-                        if self.station.take_damage(enemy.damage):
-                            # Станция уничтожена
-                            self.state = GameState.GAME_OVER
-                            self.play_sound("game_over")
-                        
-                        enemy.attack_cooldown = 1.0  # 1 секунда между атаками
-                        self.play_sound("hit")
-            
-            # Обновляем частицы
-            self.particles.update(dt)
-    
-    def handle_shop(self, pos, event):
-        """Обрабатывает действия в магазине"""
-        buttons = self.buttons[GameState.SHOP]
-        
-        for i, button in enumerate(buttons):
-            if button.is_clicked(pos, event):
-                self.play_sound("button")
-                
-                if i == 0:  # Лазер
-                    if self.station.credits >= 100:
-                        self.station.credits -= 100
-                        self.weapons.append(Weapon(0, 0, 0, self.station))
-                
-                elif i == 1:  # Плазма
-                    if self.station.credits >= 200:
-                        self.station.credits -= 200
-                        self.weapons.append(Weapon(0, 0, 1, self.station))
-                
-                elif i == 2:  # Ионная пушка
-                    if self.station.credits >= 300:
-                        self.station.credits -= 300
-                        self.weapons.append(Weapon(0, 0, 2, self.station))
-                
-                elif i == 3:  # Ракеты
-                    if self.station.credits >= 400:
-                        self.station.credits -= 400
-                        self.weapons.append(Weapon(0, 0, 3, self.station))
-                
-                elif i == 4:  # Улучшить щиты
-                    if self.station.credits >= 150:
-                        self.station.credits -= 150
-                        self.station.max_shield += 100
-                        self.station.shield += 100
-                
-                elif i == 5:  # Улучшить корпус
-                    if self.station.credits >= 150:
-                        self.station.credits -= 150
-                        self.station.max_health += 100
-                        self.station.health += 100
-                
-                elif i == 6:  # Вернуться в игру
-                    self.state = GameState.PLAYING
-                    self.wave += 1
-                    self.enemies_in_wave = 10 + (self.wave - 1) * 5
-                    self.enemies_spawned = 0
-                    self.wave_timer = 0
-    
-    def handle_events(self):
-        """Обрабатывает ввод пользователя"""
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return False
-            
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    if self.state == GameState.PLAYING:
-                        self.state = GameState.PAUSED
-                    elif self.state == GameState.PAUSED:
-                        self.state = GameState.PLAYING
-            
-            # Обработка кликов мыши
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                pos = pygame.mouse.get_pos()
-                
-                if self.state == GameState.MENU:
-                    for i, button in enumerate(self.buttons[GameState.MENU]):
-                        if button.is_clicked(pos, event):
-                            self.play_sound("button")
-                            if i == 0:  # Начать игру
-                                self.start_new_game()
-                            elif i == 1:  # Выход
-                                return False
-                
-                elif self.state == GameState.PAUSED:
-                    for i, button in enumerate(self.buttons[GameState.PAUSED]):
-                        if button.is_clicked(pos, event):
-                            self.play_sound("button")
-                            if i == 0:  # Продолжить
-                                self.state = GameState.PLAYING
-                            elif i == 1:  # Главное меню
-                                self.state = GameState.MENU
-                
-                elif self.state == GameState.GAME_OVER:
-                    for i, button in enumerate(self.buttons[GameState.GAME_OVER]):
-                        if button.is_clicked(pos, event):
-                            self.play_sound("button")
-                            if i == 0:  # Начать заново
-                                self.start_new_game()
-                            elif i == 1:  # Главное меню
-                                self.state = GameState.MENU
-                
-                elif self.state == GameState.VICTORY:
-                    for i, button in enumerate(self.buttons[GameState.VICTORY]):
-                        if button.is_clicked(pos, event):
-                            self.play_sound("button")
-                            if i == 0:  # Следующий уровень
-                                self.level += 1
-                                self.state = GameState.PLAYING
-                            elif i == 1:  # Главное меню
-                                self.state = GameState.MENU
-                
-                elif self.state == GameState.SHOP:
-                    self.handle_shop(pos, event)
-        
-        # Обновление состояния наведения кнопок
-        pos = pygame.mouse.get_pos()
-        if self.state in self.buttons:
-            for button in self.buttons[self.state]:
-                button.check_hover(pos)
-        
-        return True
-    
-    def draw_menu(self):
-        """Отрисовка главного меню"""
-        # Фон звездного поля
-        self.starfield.draw(self.screen)
-        
-        # Заголовок
-        title_text = self.title_font.render("КОСМИЧЕСКИЙ ЗАЩИТНИК", True, CYAN)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4))
-        self.screen.blit(title_text, title_rect)
-        
-        # Кнопки
-        for button in self.buttons[GameState.MENU]:
-            button.draw(self.screen)
-    
-    def draw_pause(self):
-        """Отрисовка меню паузы"""
-        # Полупрозрачный фон
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 128))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Заголовок
-        title_text = self.title_font.render("ПАУЗА", True, WHITE)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4))
-        self.screen.blit(title_text, title_rect)
-        
-        # Кнопки
-        for button in self.buttons[GameState.PAUSED]:
-            button.draw(self.screen)
-    
-    def draw_game_over(self):
-        """Отрисовка экрана поражения"""
-        # Полупрозрачный фон
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 192))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Заголовок
-        title_text = self.title_font.render("ИГРА ОКОНЧЕНА", True, RED)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4))
-        self.screen.blit(title_text, title_rect)
-        
-        # Статистика
-        stats_text = self.menu_font.render(f"Уровень: {self.level} | Волна: {self.wave} | Счет: {self.score}", True, WHITE)
-        stats_rect = stats_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 3))
-        self.screen.blit(stats_text, stats_rect)
-        
-        # Кнопки
-        for button in self.buttons[GameState.GAME_OVER]:
-            button.draw(self.screen)
-    
-    def draw_victory(self):
-        """Отрисовка экрана победы"""
-        # Полупрозрачный фон
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 192))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Заголовок
-        title_text = self.title_font.render("ПОБЕДА!", True, GREEN)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4))
-        self.screen.blit(title_text, title_rect)
-        
-        # Статистика
-        stats_text = self.menu_font.render(f"Уровень завершен: {self.level} | Счет: {self.score}", True, WHITE)
-        stats_rect = stats_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 3))
-        self.screen.blit(stats_text, stats_rect)
-        
-        # Кнопки
-        for button in self.buttons[GameState.VICTORY]:
-            button.draw(self.screen)
-    
-    def draw_shop(self):
-        """Отрисовка магазина"""
-        # Полупрозрачный фон
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 192))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Заголовок
-        title_text = self.title_font.render("МАГАЗИН", True, YELLOW)
-        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 8))
-        self.screen.blit(title_text, title_rect)
-        
-        # Кредиты
-        credits_text = self.menu_font.render(f"Кредиты: {self.station.credits}", True, GREEN)
-        credits_rect = credits_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4))
-        self.screen.blit(credits_text, credits_rect)
-        
-        # Кнопки
-        for button in self.buttons[GameState.SHOP]:
-            button.draw(self.screen)
-        
-        # Информация о текущем вооружении
-        weapons_text = self.game_font.render("Текущее вооружение:", True, WHITE)
-        weapons_rect = weapons_text.get_rect(topright=(SCREEN_WIDTH - 20, SCREEN_HEIGHT // 2 + 100))
-        self.screen.blit(weapons_text, weapons_rect)
-        
-        weapon_counts = {'Лазер': 0, 'Плазма': 0, 'Ионная пушка': 0, 'Ракеты': 0}
-        for weapon in self.weapons:
-            if weapon.weapon_type == 0:
-                weapon_counts['Лазер'] += 1
-            elif weapon.weapon_type == 1:
-                weapon_counts['Плазма'] += 1
-            elif weapon.weapon_type == 2:
-                weapon_counts['Ионная пушка'] += 1
-            elif weapon.weapon_type == 3:
-                weapon_counts['Ракеты'] += 1
-        
-        y_offset = SCREEN_HEIGHT // 2 + 130
-        for weapon_name, count in weapon_counts.items():
-            if count > 0:
-                weapon_info = self.small_font.render(f"{weapon_name}: {count}", True, WHITE)
-                self.screen.blit(weapon_info, (SCREEN_WIDTH - 150, y_offset))
-                y_offset += 20
-    
-    def draw_playing(self):
-        """Отрисовка игрового процесса"""
-        # Фон звездного поля
-        self.starfield.draw(self.screen)
-        
-        # Отрисовка частиц
-        self.particles.draw(self.screen)
-        
-        # Отрисовка врагов
-        for enemy in self.enemies:
-            enemy.draw(self.screen)
-        
-        # Отрисовка станции
-        self.station.draw(self.screen)
-        
-        # Отрисовка оружия
-        for weapon in self.weapons:
-            weapon.draw(self.screen)
-        
-        # Интерфейс
-        # Верхняя панель
-        pygame.draw.rect(self.screen, (30, 30, 50), (0, 0, SCREEN_WIDTH, 40))
-        pygame.draw.line(self.screen, WHITE, (0, 40), (SCREEN_WIDTH, 40))
-        
-        # Информация о волне и уровне
-        level_text = self.game_font.render(f"Уровень: {self.level}", True, WHITE)
-        self.screen.blit(level_text, (20, 10))
-        
-        wave_text = self.game_font.render(f"Волна: {self.wave}", True, WHITE)
-        self.screen.blit(wave_text, (150, 10))
-        
-        enemies_text = self.game_font.render(f"Враги: {len(self.enemies)}/{self.enemies_in_wave - self.enemies_spawned + len(self.enemies)}", True, WHITE)
-        self.screen.blit(enemies_text, (280, 10))
-        
-        # Информация о станции
-        health_text = self.game_font.render(f"Корпус: {self.station.health}/{self.station.max_health}", True, GREEN)
-        self.screen.blit(health_text, (450, 10))
-        
-        shield_text = self.game_font.render(f"Щиты: {int(self.station.shield)}/{self.station.max_shield}", True, CYAN)
-        self.screen.blit(shield_text, (650, 10))
-        
-        # Кредиты
-        credits_text = self.game_font.render(f"Кредиты: {self.station.credits}", True, YELLOW)
-        self.screen.blit(credits_text, (850, 10))
-        
-        # Счет
-        score_text = self.game_font.render(f"Счет: {self.score}", True, WHITE)
-        score_rect = score_text.get_rect(right=SCREEN_WIDTH - 20)
-        score_rect.y = 10
-        self.screen.blit(score_text, score_rect)
-    
-    def draw(self):
-        """Отрисовка игры в зависимости от состояния"""
-        self.screen.fill(BLACK)
-        
-        if self.state == GameState.MENU:
-            self.draw_menu()
-        elif self.state == GameState.PLAYING:
-            self.draw_playing()
-        elif self.state == GameState.PAUSED:
-            self.draw_playing()
-            self.draw_pause()
-        elif self.state == GameState.GAME_OVER:
-            self.draw_playing()
-            self.draw_game_over()
-        elif self.state == GameState.VICTORY:
-            self.draw_playing()
-            self.draw_victory()
-        elif self.state == GameState.SHOP:
-            self.draw_playing()
-            self.draw_shop()
-    
-    def run(self):
-        """Основной игровой цикл"""
-        running = True
-        last_time = time.time()
-        
-        while running:
-            # Расчет времени кадра
-            current_time = time.time()
-            dt = (current_time - last_time) * 1000  # в миллисекундах
-            dt = min(dt, 50)  # Ограничение максимального времени кадра
-            dt /= 1000  # обратно в секунды
-            last_time = current_time
-            
-            # Обработка событий
-            running = self.handle_events()
-            
-            # Обновление игры
-            self.update(dt)
-            
-            # Отрисовка
-            self.draw()
-            
-            # Обновление экрана
-            pygame.display.flip()
-            
-            # Ограничение FPS
-            self.clock.tick(FPS)
-        
-        # Сохранение прогресса при выходе
-        self.save_progress()
-        
-        pygame.quit()
-    
-    def save_progress(self):
-        """Сохраняет прогресс игры в базу данных"""
-        try:
-            session = Session()
-            
-            # Проверяем, есть ли уже запись для игрока
-            player = session.query(PlayerData).filter_by(name="player").first()
-            
-            if not player:
-                # Создаем новую запись
-                player = PlayerData(
-                    name="player",
-                    level=self.level,
-                    experience=self.score,
-                    credits=self.station.credits,
-                    station_health=self.station.health
-                )
-                session.add(player)
-            else:
-                # Обновляем существующую запись
-                player.level = self.level
-                player.experience = self.score
-                player.credits = self.station.credits
-                player.station_health = self.station.health
-            
-            # Удаляем старые улучшения и оружие
-            session.query(UpgradeData).filter_by(player_id=player.id).delete()
-            session.query(WeaponData).filter_by(player_id=player.id).delete()
-            
-            # Сохраняем текущие улучшения и оружие
-            for weapon in self.weapons:
-                weapon_data = WeaponData(
-                    player_id=player.id,
-                    name=f"Weapon Type {weapon.weapon_type}",
-                    damage=weapon.damage,
-                    cooldown=weapon.max_cooldown
-                )
-                session.add(weapon_data)
-            
-            # Фиксируем изменения
-            session.commit()
-            logger.info("Прогресс успешно сохранен")
-        
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении прогресса: {str(e)}")
-        finally:
-            session.close()
-    
-    def load_progress(self):
-        """Загружает прогресс игры из базы данных"""
-        try:
-            session = Session()
-            
-            # Загружаем данные игрока
-            player = session.query(PlayerData).filter_by(name="player").first()
-            
-            if player:
-                self.level = player.level
-                self.score = player.experience
-                self.station.credits = player.credits
-                self.station.health = player.station_health
-                
-                # Загружаем оружие
-                weapons_data = session.query(WeaponData).filter_by(player_id=player.id).all()
-                
-                for weapon_data in weapons_data:
-                    # Определяем тип оружия по имени
-                    weapon_type = int(weapon_data.name.split()[-1])
-                    
-                    # Добавляем оружие
-                    weapon = Weapon(0, 0, weapon_type, self.station)
-                    weapon.damage = weapon_data.damage
-                    weapon.max_cooldown = weapon_data.cooldown
-                    
-                    self.weapons.append(weapon)
-                
-                logger.info("Прогресс успешно загружен")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при загрузке прогресса: {str(e)}")
-        finally:
-            session.close()
+-- Save network to JSON string (weights + biases + meta)
+function NeuralNetwork:serialize()
+    local data = {
+        meta = {
+            layerSizes = self.layerSizes,
+            learningRate = self.learningRate,
+            activationName = self.activationName,
+            initRange = self.initRange
+        },
+        weights = self.weights,
+        biases = self.biases
+    }
+    local ok, res = pcall(function() return HttpService:JSONEncode(data) end)
+    if not ok then
+        error("JSON serialization failed: "..tostring(res))
+    end
+    return res
+end
 
-# Запуск игры
-if __name__ == "__main__":
-    # Отображение ASCII-арта при запуске
-    title_art = pyfiglet.figlet_format("Space Defender", font="big")
-    for line in title_art.split("\n"):
-        print(colorama.Fore.CYAN + line)
-    print(colorama.Style.RESET_ALL)
-    
-    # Создание и запуск игры
-    game = SpaceDefenderGame()
-    game.run()
+-- Load network from JSON string. Returns NeuralNetwork instance.
+function NeuralNetwork.deserialize(jsonString)
+    assert(type(jsonString) == "string", "jsonString must be string")
+    local ok, decoded = pcall(function() return HttpService:JSONDecode(jsonString) end)
+    if not ok then error("JSON decode failed: "..tostring(decoded)) end
+    local meta = decoded.meta
+    assert(meta and meta.layerSizes, "missing meta.layerSizes in serialized data")
+
+    local inputSize = meta.layerSizes[1]
+    local hidden = {}
+    for i = 2, #meta.layerSizes-1 do table.insert(hidden, meta.layerSizes[i]) end
+    local outputSize = meta.layerSizes[#meta.layerSizes]
+
+    local nn = NeuralNetwork.new(inputSize, hidden, outputSize, {
+        learningRate = meta.learningRate or 0.1,
+        activation = meta.activationName or "sigmoid",
+        initRange = meta.initRange or 0.1
+    })
+
+    -- assign weights & biases directly (but keep shape checks)
+    local function shapeMatches(decodedWeights, nnWeights)
+        if type(decodedWeights) ~= "table" then return false end
+        for l = 1, #nnWeights do
+            if type(decodedWeights[tostring(l)]) == "table" then
+                -- sometimes JSONDecode transforms numeric keys to strings; handle both
+                decodedWeights = decodedWeights
+            end
+        end
+        return true
+    end
+
+    -- If weights/biases were serialized as arrays, assign directly.
+    nn.weights = decoded.weights or nn.weights
+    nn.biases = decoded.biases or nn.biases
+
+    -- Ensure numeric indices (convert keys that are strings to numeric where necessary)
+    -- helper to normalize
+    local function normalizeNestedArray(t)
+        if type(t) ~= "table" then return t end
+        -- if keys are string numbers, convert
+        local keysAreStrings = false
+        for k,v in pairs(t) do
+            if type(k) == "string" then
+                keysAreStrings = true
+                break
+            end
+        end
+        if keysAreStrings then
+            local new = {}
+            for k,v in pairs(t) do
+                local nk = tonumber(k) or k
+                new[nk] = normalizeNestedArray(v)
+            end
+            return new
+        end
+        -- recursively normalize children
+        for k,v in pairs(t) do t[k] = normalizeNestedArray(v) end
+        return t
+    end
+
+    nn.weights = normalizeNestedArray(nn.weights)
+    nn.biases = normalizeNestedArray(nn.biases)
+
+    return nn
+end
+
+-- Convenience: save to DataStore (optional) - user can adapt
+-- NOTE: DataStore usage is commented out because it requires proper handling and limits.
+--[[
+local DataStoreService = game:GetService("DataStoreService")
+function NeuralNetwork:saveToDataStore(key, scopeName)
+    local ds = DataStoreService:GetDataStore(scopeName or "NeuralNetStore")
+    local s = self:serialize()
+    ds:SetAsync(key, s)
+end
+function NeuralNetwork.loadFromDataStore(key, scopeName)
+    local ds = DataStoreService:GetDataStore(scopeName or "NeuralNetStore")
+    local s = ds:GetAsync(key)
+    if s then
+        return NeuralNetwork.deserialize(s)
+    end
+    return nil
+end
+--]]
+
+-- ========== Logger + GUI + Example usage ==========
+
+-- Global control state
+local LOG_ENABLED = true
+local LOG_INTERVAL = 10 -- seconds
+
+-- Build GUI (safe: attempt CoreGui; if denied, fallback to PlayerGui for local player)
+local function createGUI()
+    local parent = nil
+    -- try CoreGui first (may be restricted). If cannot set, fallback.
+    local succeed, err = pcall(function() parent = CoreGui end)
+    if not succeed or not parent then
+        local localPlayer = Players.LocalPlayer
+        if localPlayer and localPlayer:FindFirstChild("PlayerGui") then
+            parent = localPlayer:FindFirstChild("PlayerGui")
+        else
+            parent = nil
+        end
+    end
+
+    if not parent then
+        warn("[NeuralNet] Unable to place GUI (no CoreGui or PlayerGui available).")
+        return nil
+    end
+
+    -- Create screen gui
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "NeuralNetGUI_" .. tostring(tick())
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = parent
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 260, 0, 120)
+    frame.Position = UDim2.new(0.02, 0, 0.02, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(28,28,28)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+    frame.Active = true
+    frame.Draggable = true
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -12, 0, 28)
+    title.Position = UDim2.new(0, 6, 0, 6)
+    title.BackgroundTransparency = 1
+    title.Text = "NeuralNet (Logger)"
+    title.Font = Enum.Font.SourceSansSemibold
+    title.TextSize = 18
+    title.TextColor3 = Color3.fromRGB(240,240,240)
+    title.Parent = frame
+
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.new(0, 120, 0, 36)
+    toggle.Position = UDim2.new(0, 6, 0, 40)
+    toggle.Text = LOG_ENABLED and "Logging: ON" or "Logging: OFF"
+    toggle.Font = Enum.Font.SourceSans
+    toggle.TextSize = 14
+    toggle.Parent = frame
+
+    local intervalLabel = Instance.new("TextLabel")
+    intervalLabel.Size = UDim2.new(0, 120, 0, 20)
+    intervalLabel.Position = UDim2.new(0, 140, 0, 44)
+    intervalLabel.BackgroundTransparency = 1
+    intervalLabel.Text = "Interval: " .. tostring(LOG_INTERVAL) .. "s"
+    intervalLabel.Font = Enum.Font.SourceSans
+    intervalLabel.TextSize = 13
+    intervalLabel.TextColor3 = Color3.fromRGB(220,220,220)
+    intervalLabel.Parent = frame
+
+    local inc = Instance.new("TextButton")
+    inc.Size = UDim2.new(0, 36, 0, 28)
+    inc.Position = UDim2.new(0, 140, 0, 68)
+    inc.Text = "+"
+    inc.Font = Enum.Font.SourceSans
+    inc.TextSize = 18
+    inc.Parent = frame
+
+    local dec = Instance.new("TextButton")
+    dec.Size = UDim2.new(0, 36, 0, 28)
+    dec.Position = UDim2.new(0, 182, 0, 68)
+    dec.Text = "-"
+    dec.Font = Enum.Font.SourceSans
+    dec.TextSize = 18
+    dec.Parent = frame
+
+    local saveBtn = Instance.new("TextButton")
+    saveBtn.Size = UDim2.new(0, 120, 0, 28)
+    saveBtn.Position = UDim2.new(0, 6, 0, 76)
+    saveBtn.Text = "Export JSON"
+    saveBtn.Font = Enum.Font.SourceSans
+    saveBtn.TextSize = 14
+    saveBtn.Parent = frame
+
+    -- Button connections
+    toggle.MouseButton1Click:Connect(function()
+        LOG_ENABLED = not LOG_ENABLED
+        toggle.Text = LOG_ENABLED and "Logging: ON" or "Logging: OFF"
+    end)
+    inc.MouseButton1Click:Connect(function()
+        LOG_INTERVAL = math.max(1, LOG_INTERVAL - 1) -- plus/minus reversed to reflect UI (+ reduces interval)
+        intervalLabel.Text = "Interval: " .. tostring(LOG_INTERVAL) .. "s"
+    end)
+    dec.MouseButton1Click:Connect(function()
+        LOG_INTERVAL = LOG_INTERVAL + 1
+        intervalLabel.Text = "Interval: " .. tostring(LOG_INTERVAL) .. "s"
+    end)
+    saveBtn.MouseButton1Click:Connect(function()
+        -- produce JSON and copy to clipboard if possible; otherwise print length and first/last chars
+        local ok, json = pcall(function() return NeuralNetworkInstance:serialize() end)
+        if ok and json then
+            -- Try to copy to clipboard via SetClipboard (available in Studio)
+            local success, errmsg = pcall(function() setclipboard(json) end)
+            if success then
+                print("[NeuralNet GUI] JSON copied to clipboard.")
+            else
+                -- fallback: print truncated
+                print("[NeuralNet GUI] JSON length:", #json, " (first 200 chars):")
+                print(string.sub(json,1,200))
+            end
+        else
+            warn("[NeuralNet GUI] Failed to serialize network:", json)
+        end
+    end)
+
+    return screenGui
+end
+
+-- Create a default network instance (example sizes). You can replace sizes when constructing from your code.
+local NeuralNetworkInstance = NeuralNetwork.new(2, {4}, 1, {
+    learningRate = 0.1,
+    activation = "sigmoid",
+    initRange = 0.1
+})
+
+-- Logger loop
+task.spawn(function()
+    while true do
+        local interval = LOG_INTERVAL or 10
+        task.wait(interval)
+        if LOG_ENABLED then
+            -- Provide some useful info about network
+            local info = string.format("[NeuralNet] active — layers: %d (sizes: %s) lr=%.4f",
+                #NeuralNetworkInstance.layerSizes,
+                table.concat(NeuralNetworkInstance.layerSizes, ","),
+                NeuralNetworkInstance.learningRate
+            )
+            print(info)
+        end
+    end
+end)
+
+-- Optional: apply predicted output to local player's humanoid (safe-guarded)
+local function tryApplyToLocalHumanoid()
+    local player = Players.LocalPlayer
+    if not player then return end
+    local character = player.Character or player.CharacterAdded:Wait()
+    if not character then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not hrp or not humanoid then return end
+
+    RunService.RenderStepped:Connect(function()
+        if LOG_ENABLED then
+            local input = { hrp.Position.X, hrp.Position.Y }
+            local out = NeuralNetworkInstance:predict(input)
+            if type(out) == "table" and out[1] then
+                -- clamp and set WalkSpeed safely
+                local value = tonumber(out[1]) or 0
+                local ws = 16 + (value * 10)
+                if humanoid and humanoid.Parent then
+                    humanoid.WalkSpeed = math.clamp(ws, 6, 100)
+                end
+            end
+        end
+    end)
+end
+
+-- Build GUI (non-blocking)
+task.spawn(function()
+    local gui = createGUI()
+    if gui then
+        print("[NeuralNet] GUI created.")
+    end
+end)
+
+-- Example: train small XOR dataset in background (non-blocking)
+task.spawn(function()
+    local inputs = {
+        {0,0},
+        {0,1},
+        {1,0},
+        {1,1}
+    }
+    local targets = {
+        {0},
+        {1},
+        {1},
+        {0}
+    }
+    print("[NeuralNet] Starting sample training (XOR) — this runs in background.")
+    NeuralNetworkInstance:train(inputs, targets, { epochs = 500, shuffle = true, verboseEvery = 100, batchSize = 1 })
+    print("[NeuralNet] Sample training complete.")
+end)
+
+-- Public API table (so users can access from other scripts if they require this module)
+local API = {
+    NeuralNetwork = NeuralNetwork,
+    new = function(...) return NeuralNetwork.new(...) end,
+    deserialize = function(json) return NeuralNetwork.deserialize(json) end,
+    instance = NeuralNetworkInstance,
+    setLogInterval = function(sec) LOG_INTERVAL = math.max(1, tonumber(sec) or LOG_INTERVAL) end,
+    enableLog = function(b) LOG_ENABLED = (b and true) end,
+    disableLog = function() LOG_ENABLED = false end
+}
+
+-- Expose to _G for easy interactive usage (optional)
+_G.NeuralNetAPI = API
+
+print("[NeuralNet] Ready. API available as _G.NeuralNetAPI. Instance:", NeuralNetworkInstance)
+
+-- Return API for require-style usage when loaded as ModuleScript (if used that way)
+return API
